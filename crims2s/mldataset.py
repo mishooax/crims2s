@@ -6,6 +6,15 @@ import omegaconf
 import pandas as pd
 import pathlib
 import xarray as xr
+import os
+
+import warnings
+print("Warning: ignoring future warning")
+warnings.simplefilter(action='ignore', category=FutureWarning)
+
+# git clone https://github.com/ecmwf-lab/ecmwf-ml-utils.git
+# pip install it
+from ecmwf_ml_utils.dask_utils import create_ssh_client, WorkerLocalLoggerPlugin, __trim_worker_memory
 
 from .distribution import fit_gamma_xarray, fit_normal_xarray
 from .transform import normalize_dataset
@@ -273,13 +282,18 @@ class NCEPModelParameters(ExamplePartMaker):
 def datestrings_from_input_dir(input_dir, center):
     input_path = pathlib.Path(input_dir)
     print(input_path)
-    return sorted(
+    out = sorted(
         [
             x.stem.split("-")[-1]
             for x in input_path.iterdir()
             if "t2m" in x.stem and center in x.stem
         ]
     )
+    assert out, (input_dir,out)
+    print('HERE')
+    out = [out[-1]]
+
+    return out
 
 
 def preprocess_single_level_file(d):
@@ -396,9 +410,23 @@ def cli(cfg):
     output_path = pathlib.Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
+    print('config written in ', output_path / "confg.yaml")
     with open(output_path / "confg.yaml", "w") as f:
         cfg_string = omegaconf.OmegaConf.to_yaml(cfg, resolve=True)
         f.write(cfg_string)
+
+    user = os.environ['USER']
+    c = create_ssh_client(
+        num_workers_per_node= 16,
+        worker_memory_limit= '16G',
+        num_threads_per_worker= 1,
+        #scheduler_port= 8786,
+        #dashboard_port= 8787,
+        local_temp_dir= f'/ec/res4/scratch/{user}/dask-tmp',
+    )
+    c.register_worker_plugin(WorkerLocalLoggerPlugin(f'/ec/res4/scratch/{user}/dask-log'))
+    c.run(__trim_worker_memory)
+
 
     input_dir = hydra.utils.to_absolute_path(cfg.set.input.flat)
     input_dir_plev = hydra.utils.to_absolute_path(cfg.set.input.plev)
@@ -413,11 +441,40 @@ def cli(cfg):
     _logger.info(f"Will only operate on datestrings: {datestrings}")
 
     edges = xr.open_dataset(hydra.utils.to_absolute_path(cfg.set.aggregated_obs.edges))
+    # edges =
+    # Dimensions:        (week: 53, category_edge: 2, lead_time: 2, latitude: 121,
+    #                     longitude: 240)
+    # Coordinates:
+    #   * latitude       (latitude) float64 90.0 88.5 87.0 85.5 ... -87.0 -88.5 -90.0
+    #   * lead_time      (lead_time) timedelta64[ns] 14 days 28 days
+    #   * longitude      (longitude) float64 0.0 1.5 3.0 4.5 ... 355.5 357.0 358.5
+    #   * category_edge  (category_edge) float64 0.3333 0.6667
+    #   * week           (week) int64 1 2 3 4 5 6 7 8 9 ... 45 46 47 48 49 50 51 52 53
+    # Data variables:
+    #     t2m            (week, category_edge, lead_time, latitude, longitude) float32 ...
+    #     tp             (week, category_edge, lead_time, latitude, longitude) float32 ...
+    print(edges)
+
     obs_terciled = xr.open_dataset(
         hydra.utils.to_absolute_path(cfg.set.aggregated_obs.terciled)
     )
+    # obs_terciles =
+    # Dimensions:        (category: 3, forecast_time: 1060, latitude: 121,
+    #                     lead_time: 2, longitude: 240)
+    # Coordinates:
+    #   * category       (category) object 'below normal' 'near normal' 'above normal'
+    #   * forecast_time  (forecast_time) datetime64[ns] 2000-01-02 ... 2019-12-31
+    #   * latitude       (latitude) float64 90.0 88.5 87.0 85.5 ... -87.0 -88.5 -90.0
+    #   * lead_time      (lead_time) timedelta64[ns] 14 days 28 days
+    #   * longitude      (longitude) float64 0.0 1.5 3.0 4.5 ... 355.5 357.0 358.5
+    #     valid_time     (lead_time, forecast_time) datetime64[ns] ...
+    # Data variables:
+    #     t2m            (category, lead_time, forecast_time, latitude, longitude) float32 ...
+    #     tp             (category, lead_time, forecast_time, latitude, longitude) float32 ...
+    print(obs_terciled)
     # raw_obs = read_raw_obs(cfg.raw_obs.t2m_file, cfg.raw_obs.pr_file)
 
+    print(datestrings)
     for datestring in datestrings:
         _logger.info(f"Processing datestring {datestring}...")
 
@@ -483,6 +540,7 @@ def cli(cfg):
         model = model.isel(lead_time=slice(1, None))
 
         _logger.info("Persisting merged dataset...")
+        print(features)
         features = features.persist()
 
         years = model.forecast_year

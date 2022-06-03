@@ -1,7 +1,8 @@
 defaults:
   - set: train
 
-base_dir: ???
+base_dir: /perm/mafp/s2s-links/splitter-output
+base_dir_read_only: /perm/mafp/s2s-links/read-only
 
 
 fields:

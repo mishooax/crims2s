@@ -2,7 +2,6 @@
 
 import os
 import dask.distributed
-import dask_jobqueue
 import dask.config
 import logging
 import getpass
@@ -24,13 +23,15 @@ def load_project_defaults():
 
 
 def create_dask_cluster(conda_env: str = "s2s", **kwargs):
-    username = getpass.getuser()
-    homedir = os.path.expanduser("~")
-
-    _logger.debug(f"Start Dask for {username} with {conda_env} conda environment")
-
-    bash_profile: str = os.path.join(homedir, ".bash_profile")
-    _logger.debug(f"bash_profile: {bash_profile}")
-
-    env_extrat = ["source " + bash_profile, "conda activate " + conda_env]
-    return dask_jobqueue.SLURMCluster(env_extra=env_extrat, **kwargs)
+    raise Exception()
+#     import dask_jobqueue
+#     username = getpass.getuser()
+#     homedir = os.path.expanduser("~")
+# 
+#     _logger.debug(f"Start Dask for {username} with {conda_env} conda environment")
+# 
+#     bash_profile: str = os.path.join(homedir, ".bash_profile")
+#     _logger.debug(f"bash_profile: {bash_profile}")
+# 
+#     env_extrat = ["source " + bash_profile, "conda activate " + conda_env]
+#     return dask_jobqueue.SLURMCluster(env_extra=env_extrat, **kwargs)

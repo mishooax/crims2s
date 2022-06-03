@@ -1,7 +1,7 @@
 aggregated_obs:
-  deterministic: ${base_dir}/hindcast-like_observations_2000-2019_biweekly_deterministic.nc
-  terciled: ${base_dir}/hindcast-like_observations_2000-2019_biweekly_terciled.nc
-  edges: ${base_dir}/hindcast-like-observations_2000-2019_biweekly_tercile-edges.nc
+  deterministic: ${base_dir_aggregated}/hindcast-like_observations_2000-2019_biweekly_deterministic.nc
+  terciled: ${base_dir_aggregated}/hindcast-like_observations_2000-2019_biweekly_terciled.nc
+  edges: ${base_dir_aggregated}/hindcast-like-observations_2000-2019_biweekly_tercile-edges.nc
 input:
   flat: ${base_dir}/training-input
   plev: ${base_dir}/training-input
