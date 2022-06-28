@@ -1,32 +1,39 @@
 """Generate a ML-ready dataset from the S2S competition data."""
+import logging
+import os
+import pathlib
+import warnings
+from typing import List
 
 import hydra
-import logging
 import omegaconf
 import pandas as pd
-import pathlib
 import xarray as xr
-import os
 
-import warnings
 print("Warning: ignoring future warning")
-warnings.simplefilter(action='ignore', category=FutureWarning)
+warnings.simplefilter(action="ignore", category=FutureWarning)
+
+from dask.distributed import Future
 
 # git clone https://github.com/ecmwf-lab/ecmwf-ml-utils.git
-# pip install it
-from ecmwf_ml_utils.dask_utils import create_ssh_client, WorkerLocalLoggerPlugin, __trim_worker_memory
-
+# pip install with : pip install --user -e .
+from ecmwf_ml_utils.dask_utils import (
+    CustomLogger,
+    LoggerWorkerPlugin,
+    create_ssh_client,
+    trim_worker_memory,
+)
 from .distribution import fit_gamma_xarray, fit_normal_xarray
 from .transform import normalize_dataset
 from .util import (
-    add_biweekly_dim,
-    fix_dataset_dims,
     ECMWF_FORECASTS,
     NCEP_FORECASTS,
     TEST_THRESHOLD,
+    add_biweekly_dim,
+    fix_dataset_dims,
 )
 
-_logger = logging.getLogger(__name__)
+_logger = CustomLogger(__name__)
 
 
 def obs_of_forecast(forecast, raw_obs, threshold=TEST_THRESHOLD):
@@ -55,7 +62,10 @@ class ExamplePartMaker:
 
 class FeatureExamplePartMaker(ExamplePartMaker):
     def __init__(
-        self, features, weekly_steps=False, n_realizations=None,
+        self,
+        features,
+        weekly_steps=False,
+        n_realizations=None,
     ):
         self.features = features
         self.weekly_steps = weekly_steps
@@ -67,7 +77,13 @@ class FeatureExamplePartMaker(ExamplePartMaker):
             .sel(forecast_year=year)
             .to_array()
             .rename("features")
-            .transpose("lead_time", "latitude", "longitude", "realization", "variable",)
+            .transpose(
+                "lead_time",
+                "latitude",
+                "longitude",
+                "realization",
+                "variable",
+            )
         )
 
         if self.n_realizations:
@@ -88,7 +104,12 @@ class ModelExamplePartMaker(ExamplePartMaker):
         model = (
             self.model.isel(forecast_monthday=0)
             .sel(forecast_year=year)
-            .transpose("lead_time", "latitude", "longitude", "realization",)
+            .transpose(
+                "lead_time",
+                "latitude",
+                "longitude",
+                "realization",
+            )
         )
 
         if self.n_realizations:
@@ -134,9 +155,11 @@ class EdgesExamplePartMaker(ExamplePartMaker):
 
 
 def make_model_params(
-    model: xr.Dataset, weeks_12=False, interp_tp_na=False,
+    model: xr.Dataset,
+    weeks_12=False,
+    interp_tp_na=False,
 ) -> xr.Dataset:
-    """Convert daily model data to biweekly aggregated distributions. This 
+    """Convert daily model data to biweekly aggregated distributions. This
     function outputs the parameters for 4 distributions. Three for precipitation and
     one for temperature."""
     max_valid_time = model.valid_time.compute().max()
@@ -184,7 +207,12 @@ def make_model_params(
     tp_parameters_cube_root = fit_normal_xarray(tp_cube_root, dim="realization")
 
     merged = xr.merge(
-        [t2m_parameters, tp_parameters, tp_parameters_normal, tp_parameters_cube_root,]
+        [
+            t2m_parameters,
+            tp_parameters,
+            tp_parameters_normal,
+            tp_parameters_cube_root,
+        ]
     )
 
     return merged
@@ -289,10 +317,7 @@ def datestrings_from_input_dir(input_dir, center):
             if "t2m" in x.stem and center in x.stem
         ]
     )
-    assert out, (input_dir,out)
-    print('HERE')
-    out = [out[-1]]
-
+    assert out, (input_dir, out)
     return out
 
 
@@ -307,7 +332,10 @@ def read_flat_fields(input_dir, center, fields, datestring, file_label="hindcast
     filenames = [
         f"{input_dir}/{center}-{file_label}-{f}-{datestring}.nc" for f in fields
     ]
-    flat_dataset = xr.open_mfdataset(filenames, preprocess=fix_dataset_dims)
+    _logger.debug("read_flat_fields: opening %s", " ".join(filenames))
+    flat_dataset = xr.open_mfdataset(
+        filenames, preprocess=fix_dataset_dims, parallel=True, chunks={}
+    )
 
     for dim in ["depth_below_and_layer", "meanSea"]:
         if dim in flat_dataset.dims:
@@ -324,8 +352,10 @@ def read_plev_fields(input_dir, center, fields, datestring, file_label="hindcast
             plev_files.append(
                 f"{input_dir}/{center}-{file_label}-{field}{level}-{datestring}.nc"
             )
-
-    return xr.open_mfdataset(plev_files, preprocess=preprocess_single_level_file)
+    _logger.debug("read_plev_fields: opening %s", " ".join(plev_files))
+    return xr.open_mfdataset(
+        plev_files, parallel=True, preprocess=preprocess_single_level_file, chunks={}
+    )
 
 
 def make_yearly_examples(years, makers, output_path):
@@ -410,23 +440,22 @@ def cli(cfg):
     output_path = pathlib.Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    print('config written in ', output_path / "confg.yaml")
+    print("config written in ", output_path / "confg.yaml")
     with open(output_path / "confg.yaml", "w") as f:
         cfg_string = omegaconf.OmegaConf.to_yaml(cfg, resolve=True)
         f.write(cfg_string)
 
-    user = os.environ['USER']
+    user = os.environ["USER"]
     c = create_ssh_client(
-        num_workers_per_node= 16,
-        worker_memory_limit= '16G',
-        num_threads_per_worker= 1,
-        #scheduler_port= 8786,
-        #dashboard_port= 8787,
-        local_temp_dir= f'/ec/res4/scratch/{user}/dask-tmp',
+        num_workers_per_node=cfg.dask.num_workers,
+        worker_memory_limit=cfg.dask.max_memory_per_worker,
+        num_threads_per_worker=cfg.dask.num_threads_per_worker,
+        # scheduler_port=8786,
+        # dashboard_port=8787,
+        local_temp_dir=cfg.dask.local_temp_dir,
     )
-    c.register_worker_plugin(WorkerLocalLoggerPlugin(f'/ec/res4/scratch/{user}/dask-log'))
-    c.run(__trim_worker_memory)
-
+    c.register_worker_plugin(LoggerWorkerPlugin(cfg.dask.log_dir))
+    c.run(trim_worker_memory)
 
     input_dir = hydra.utils.to_absolute_path(cfg.set.input.flat)
     input_dir_plev = hydra.utils.to_absolute_path(cfg.set.input.plev)
@@ -440,7 +469,13 @@ def cli(cfg):
 
     _logger.info(f"Will only operate on datestrings: {datestrings}")
 
-    edges = xr.open_dataset(hydra.utils.to_absolute_path(cfg.set.aggregated_obs.edges))
+    edges = xr.open_dataset(
+        hydra.utils.to_absolute_path(cfg.set.aggregated_obs.edges),
+        chunks={},
+    )
+    _logger.info("edges.chunks: %s", edges.chunks)
+    edges = edges.persist()
+
     # edges =
     # Dimensions:        (week: 53, category_edge: 2, lead_time: 2, latitude: 121,
     #                     longitude: 240)
@@ -453,12 +488,15 @@ def cli(cfg):
     # Data variables:
     #     t2m            (week, category_edge, lead_time, latitude, longitude) float32 ...
     #     tp             (week, category_edge, lead_time, latitude, longitude) float32 ...
-    print(edges)
 
     obs_terciled = xr.open_dataset(
-        hydra.utils.to_absolute_path(cfg.set.aggregated_obs.terciled)
+        hydra.utils.to_absolute_path(cfg.set.aggregated_obs.terciled),
+        chunks={},
     )
-    # obs_terciles =
+    _logger.info("obs_terciled.chunks: %s", obs_terciled.chunks)
+    obs_terciled = obs_terciled.persist()
+
+    # obs_terciled =
     # Dimensions:        (category: 3, forecast_time: 1060, latitude: 121,
     #                     lead_time: 2, longitude: 240)
     # Coordinates:
@@ -471,109 +509,138 @@ def cli(cfg):
     # Data variables:
     #     t2m            (category, lead_time, forecast_time, latitude, longitude) float32 ...
     #     tp             (category, lead_time, forecast_time, latitude, longitude) float32 ...
-    print(obs_terciled)
+
     # raw_obs = read_raw_obs(cfg.raw_obs.t2m_file, cfg.raw_obs.pr_file)
 
-    print(datestrings)
-    for datestring in datestrings:
-        _logger.info(f"Processing datestring {datestring}...")
+    _logger.debug("------- START PROCESSING... ------")
 
-        _logger.info("Reading flat fields...")
-        flat_dataset = read_flat_fields(
+    futures: List[Future] = []
+    for datestring in datestrings:
+        single_date_future = c.submit(
+            process_single_date,
+            cfg,
+            output_path,
             input_dir,
+            input_dir_plev,
+            edges,
+            obs_terciled,
+            datestring,
+        )
+        futures.append(single_date_future)
+    _ = c.gather(futures)
+
+    _logger.debug("---- DONE! ----")
+
+    c.shutdown()
+
+
+def process_single_date(
+    cfg, output_path, input_dir, input_dir_plev, edges, obs_terciled, datestring
+):
+
+    _logger.info(f"Processing datestring {datestring}...")
+
+    _logger.info("Reading flat fields...")
+    flat_dataset = read_flat_fields(
+        input_dir,
+        cfg.center,
+        cfg.fields.flat,
+        datestring,
+        file_label=cfg.set.file_label,
+    )
+
+    _logger.info("Reading fields with vertical levels...")
+    plev_fields = cfg.fields.get("plev", dict())
+    datasets = [flat_dataset]
+    if plev_fields:
+        plev_dataset = read_plev_fields(
+            input_dir_plev,
             cfg.center,
-            cfg.fields.flat,
+            plev_fields,
             datestring,
             file_label=cfg.set.file_label,
         )
+        datasets.append(plev_dataset)
 
-        _logger.info("Reading fields with vertical levels...")
-        plev_fields = cfg.fields.get("plev", dict())
-        datasets = [flat_dataset]
-        if plev_fields:
-            plev_dataset = read_plev_fields(
-                input_dir_plev,
-                cfg.center,
-                plev_fields,
-                datestring,
-                file_label=cfg.set.file_label,
-            )
-            datasets.append(plev_dataset)
+    features = xr.merge(datasets)
+    features = normalize_dataset(features)
+    features = remove_nans(features)
 
-        features = xr.merge(datasets)
-        features = normalize_dataset(features)
-        features = remove_nans(features)
+    _logger.info("Datestring: %s --- features: %s", datestring, features)
 
-        model = flat_dataset[["t2m", "tp", "forecast_time"]]
+    model = flat_dataset[["t2m", "tp", "forecast_time"]]
 
-        eccc_data = read_flat_fields(
-            input_dir, "eccc", ["t2m", "tp"], datestring, file_label=cfg.set.file_label
+    _logger.info("Datestring: %s --- reading ECCC data ...", datestring)
+    eccc_data = read_flat_fields(
+        input_dir, "eccc", ["t2m", "tp"], datestring, file_label=cfg.set.file_label
+    )
+
+    ncep_datestring = ecmwf_datestring_to_ncep_datestring(datestring, set=cfg.set.name)
+
+    if ncep_datestring:
+        _logger.info("Datestring: %s --- reading NCEP data ...", ncep_datestring)
+        ncep_data = read_flat_fields(
+            input_dir,
+            "ncep",
+            ["t2m", "tp"],
+            ncep_datestring,
+            file_label=cfg.set.file_label,
         )
-
-        ncep_datestring = ecmwf_datestring_to_ncep_datestring(
-            datestring, set=cfg.set.name
+        ncep_data = ncep_data.where(
+            ncep_data.forecast_year >= model.forecast_year[0], drop=True
         )
+    else:
+        _logger.info("No corresponding NCEP forecast found. Skipping NCEP.")
+        ncep_data = None
 
-        if ncep_datestring:
-            ncep_data = read_flat_fields(
-                input_dir,
-                "ncep",
-                ["t2m", "tp"],
-                ncep_datestring,
-                file_label=cfg.set.file_label,
-            )
-            ncep_data = ncep_data.where(
-                ncep_data.forecast_year >= model.forecast_year[0], drop=True
-            )
-        else:
-            _logger.info("No corresponding NCEP forecast found. Skipping NCEP.")
-            ncep_data = None
+    # Super evil temporary hack: the ECMWF data is sprinkled with nans, but it looks
+    # like what are nans should be zeros. So we replace them arbitratily with zeros.
+    model["tp"] = model["tp"].fillna(0.0)
 
-        # Super evil temporary hack: the ECMWF data is sprinkled with nans, but it looks
-        # like what are nans should be zeros. So we replace them arbitratily with zeros.
-        model["tp"] = model["tp"].fillna(0.0)
+    # A lot of the fields we use have null lead time 0 for ECMWF.
+    # We remove lead time 1 for all the dataset.
+    # Shouldn't matter too much since we are interested in leads 14-42 anyways.
+    features = features.isel(lead_time=slice(1, None))
+    model = model.isel(lead_time=slice(1, None))
 
-        # A lot of the fields we use have null lead time 0 for ECMWF.
-        # We remove lead time 1 for all the dataset.
-        # Shouldn't matter too much since we are interested in leads 14-42 anyways.
-        features = features.isel(lead_time=slice(1, None))
-        model = model.isel(lead_time=slice(1, None))
+    # do NOT persist the data here (OOM)
+    # _logger.info("Persisting merged dataset...")
+    # print(features)
+    # features = features.persist()
 
-        _logger.info("Persisting merged dataset...")
-        print(features)
-        features = features.persist()
+    years = model.forecast_year
 
-        years = model.forecast_year
-
-        if cfg.set.last_forecast:
-            years = model.forecast_year[
-                model.forecast_time < pd.to_datetime(cfg.set.last_forecast)
-            ]
-
-        if cfg.set.year:
-            years = years.where(years == cfg.set.year, drop=True)
-
-        _logger.info(f"Will make examples for years: {years.data}")
-
-        part_makers = [
-            (
-                "features",
-                FeatureExamplePartMaker(
-                    features, n_realizations=cfg.n_realizations, weekly_steps=True,
-                ),
-            ),
-            ("model", ModelExamplePartMaker(model, n_realizations=cfg.n_realizations)),
-            ("terciles", TercilesExamplePartMaker(obs_terciled)),
-            # ("obs", ObsExamplePartMaker(raw_obs, cfg.set.valid_threshold)),
-            ("edges", EdgesExamplePartMaker(edges)),
-            (
-                "model_parameters",
-                ModelParametersExamplePartMaker(weeks_12=cfg.weeks_12),
-            ),
-            ("eccc_parameters", ECCCModelParameters(eccc_data, weeks_12=cfg.weeks_12)),
-            ("ncep_parameters", NCEPModelParameters(ncep_data, weeks_12=cfg.weeks_12)),
+    if cfg.set.last_forecast:
+        years = model.forecast_year[
+            model.forecast_time < pd.to_datetime(cfg.set.last_forecast)
         ]
-        make_yearly_examples(years, part_makers, output_path)
+
+    if cfg.set.year:
+        years = years.where(years == cfg.set.year, drop=True)
+
+    _logger.info(f"Will make examples for years: {years.data}")
+
+    part_makers = [
+        (
+            "features",
+            FeatureExamplePartMaker(
+                features,
+                n_realizations=cfg.n_realizations,
+                weekly_steps=True,
+            ),
+        ),
+        ("model", ModelExamplePartMaker(model, n_realizations=cfg.n_realizations)),
+        ("terciles", TercilesExamplePartMaker(obs_terciled)),
+        # ("obs", ObsExamplePartMaker(raw_obs, cfg.set.valid_threshold)),
+        ("edges", EdgesExamplePartMaker(edges)),
+        (
+            "model_parameters",
+            ModelParametersExamplePartMaker(weeks_12=cfg.weeks_12),
+        ),
+        ("eccc_parameters", ECCCModelParameters(eccc_data, weeks_12=cfg.weeks_12)),
+        ("ncep_parameters", NCEPModelParameters(ncep_data, weeks_12=cfg.weeks_12)),
+    ]
+    make_yearly_examples(years, part_makers, output_path)
 
 
 if __name__ == "__main__":

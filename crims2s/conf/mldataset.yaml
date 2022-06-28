@@ -13,13 +13,20 @@ hydra:
 
 base_dir_aggregated: /perm/mafp/s2s-links/renku-dataset
 base_dir: /perm/mafp/s2s-links/splitter-output
-output_dir:  /perm/mafp/s2s-links/mldataset-output
+output_dir: /perm/mafp/s2s-links/mldataset-output
 center: 'ecmwf'
 n_weeks:   # Amount of weeks to process. None means all weeks. Useful for debugging.
 weeks_12: False  # Whether to add weeks 12 to the examples or only make examples with weeks 3-6.
 weekly_steps: False
 n_realizations: 11
 
-
 # Switches to generate a specific file. Useful for debugging or parallel execution on Slurm.
 index:
+
+# dask
+dask:
+  num_workers: 16
+  num_threads_per_worker: 8
+  max_memory_per_worker: "40G"
+  local_temp_dir: /ec/res4/scratch/mafp/dask-tmp
+  log_dir: /ec/res4/scratch/mafp/dask-log
