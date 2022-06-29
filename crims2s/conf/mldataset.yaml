@@ -28,5 +28,6 @@ dask:
   num_workers: 16
   num_threads_per_worker: 8
   max_memory_per_worker: "40G"
-  local_temp_dir: /ec/res4/scratch/mafp/dask-tmp
-  log_dir: /ec/res4/scratch/mafp/dask-log
+  local_temp_dir: ${oc.env:SCRATCH}/dask-tmp
+  log_dir: ${oc.env:SCRATCH}/dask-log
+  enabled: True

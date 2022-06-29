@@ -439,17 +439,18 @@ def cli(cfg):
         cfg_string = omegaconf.OmegaConf.to_yaml(cfg, resolve=True)
         f.write(cfg_string)
 
-    user = os.environ["USER"]
-    client = CustomSshClient(
-    #client = NonDaskClient(
-        num_workers_per_node=cfg.dask.num_workers,
-        worker_memory_limit=cfg.dask.max_memory_per_worker,
-        num_threads_per_worker=cfg.dask.num_threads_per_worker,
-        # scheduler_port=8786,
-        # dashboard_port=8787,
-        local_temp_dir=cfg.dask.local_temp_dir,
-        dask_log_dir=cfg.dask.log_dir,
-    )
+    if cfg.dask.enabled:
+        client = CustomSshClient(
+            num_workers_per_node=cfg.dask.num_workers,
+            worker_memory_limit=cfg.dask.max_memory_per_worker,
+            num_threads_per_worker=cfg.dask.num_threads_per_worker,
+            # scheduler_port=8786,
+            # dashboard_port=8787,
+            local_temp_dir=cfg.dask.local_temp_dir,
+            dask_log_dir=cfg.dask.log_dir,
+        )
+    else:
+        client = NonDaskClient()
 
     input_dir = hydra.utils.to_absolute_path(cfg.set.input.flat)
     input_dir_plev = hydra.utils.to_absolute_path(cfg.set.input.plev)
