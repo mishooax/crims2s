@@ -13,16 +13,10 @@ import xarray as xr
 print("Warning: ignoring future warning")
 warnings.simplefilter(action="ignore", category=FutureWarning)
 
-from dask.distributed import Future
-
 # git clone https://github.com/ecmwf-lab/ecmwf-ml-utils.git
 # pip install with : pip install --user -e .
-from ecmwf_ml_utils.dask_utils import (
-    CustomLogger,
-    LoggerWorkerPlugin,
-    create_ssh_client,
-    trim_worker_memory,
-)
+from ecmwf_ml_utils.dask_utils import CustomLogger, CustomSshClient, NonDaskClient
+
 from .distribution import fit_gamma_xarray, fit_normal_xarray
 from .transform import normalize_dataset
 from .util import (
@@ -446,16 +440,16 @@ def cli(cfg):
         f.write(cfg_string)
 
     user = os.environ["USER"]
-    c = create_ssh_client(
+    client = CustomSshClient(
+    #client = NonDaskClient(
         num_workers_per_node=cfg.dask.num_workers,
         worker_memory_limit=cfg.dask.max_memory_per_worker,
         num_threads_per_worker=cfg.dask.num_threads_per_worker,
         # scheduler_port=8786,
         # dashboard_port=8787,
         local_temp_dir=cfg.dask.local_temp_dir,
+        dask_log_dir=cfg.dask.log_dir,
     )
-    c.register_worker_plugin(LoggerWorkerPlugin(cfg.dask.log_dir))
-    c.run(trim_worker_memory)
 
     input_dir = hydra.utils.to_absolute_path(cfg.set.input.flat)
     input_dir_plev = hydra.utils.to_absolute_path(cfg.set.input.plev)
@@ -514,9 +508,9 @@ def cli(cfg):
 
     _logger.debug("------- START PROCESSING... ------")
 
-    futures: List[Future] = []
+    futures = []
     for datestring in datestrings:
-        single_date_future = c.submit(
+        single_date_future = client.submit(
             process_single_date,
             cfg,
             output_path,
@@ -527,11 +521,11 @@ def cli(cfg):
             datestring,
         )
         futures.append(single_date_future)
-    _ = c.gather(futures)
+    _ = client.gather(futures)
 
     _logger.debug("---- DONE! ----")
 
-    c.shutdown()
+    client.shutdown()
 
 
 def process_single_date(
