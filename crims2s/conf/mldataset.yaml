@@ -1,6 +1,8 @@
 defaults:
 - fields: both_easy
 - set: train
+- dask: medium_slurm
+- _self_
 
 hydra:
   run:
@@ -22,12 +24,3 @@ n_realizations: 11
 
 # Switches to generate a specific file. Useful for debugging or parallel execution on Slurm.
 index:
-
-# dask
-dask:
-  num_workers: 16
-  num_threads_per_worker: 8
-  max_memory_per_worker: "40G"
-  local_temp_dir: ${oc.env:SCRATCH}/dask-tmp
-  log_dir: ${oc.env:SCRATCH}/dask-log
-  enabled: True
