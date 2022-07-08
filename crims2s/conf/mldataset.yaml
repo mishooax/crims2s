@@ -15,7 +15,7 @@ hydra:
 
 base_dir_aggregated: /perm/mafp/s2s-links/renku-dataset
 base_dir: /perm/mafp/s2s-links/splitter-output
-output_dir: /perm/mafp/s2s-links/mldataset-output
+output_dir: /perm/syma/s2s-links/mldataset-output
 center: 'ecmwf'
 n_weeks:   # Amount of weeks to process. None means all weeks. Useful for debugging.
 weeks_12: False  # Whether to add weeks 12 to the examples or only make examples with weeks 3-6.

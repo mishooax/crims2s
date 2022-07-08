@@ -1,6 +1,6 @@
-num_workers: 16
-num_threads_per_worker: 8
-max_memory_per_worker: "40G"
+num_workers_per_node: 6
+num_threads_per_worker: 4
+max_memory_per_worker: "42G"
 local_temp_dir: ${oc.env:SCRATCH}/dask-tmp
 log_dir: ${oc.env:SCRATCH}/dask-log
 enabled: True

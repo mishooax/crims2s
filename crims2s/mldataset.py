@@ -1,5 +1,4 @@
 """Generate a ML-ready dataset from the S2S competition data."""
-import logging
 import os
 import pathlib
 import warnings
@@ -9,6 +8,8 @@ import hydra
 import omegaconf
 import pandas as pd
 import xarray as xr
+
+from dask.distributed import Future, wait
 
 print("Warning: ignoring future warning")
 warnings.simplefilter(action="ignore", category=FutureWarning)
@@ -352,47 +353,6 @@ def read_plev_fields(input_dir, center, fields, datestring, file_label="hindcast
     )
 
 
-def make_yearly_examples(years, makers, output_path):
-    for year in years:
-        _logger.info(f"Making example for year {year.data}.")
-        example = {}
-        for name, part_maker in makers:
-            _logger.debug(f" Making part {name}.")
-            example_part = part_maker(year, example)
-            if example_part is not None:
-                example[name] = part_maker(year, example)
-
-        save_example(example, output_path)
-
-
-def save_examples(examples, output_path):
-    for e in examples:
-        _logger.info(f"Saving year: {int(e['terciles'].forecast_year)}")
-        save_example(e, output_path)
-
-
-def save_example(example, output_path: pathlib.Path):
-    """Save an example to a single netcdf file. x is the input features. obs is the
-    observations for every valid time in the forecast. y is the terciled target
-    distribution (below, within, above normal)."""
-    forecast_time = example["terciles"].forecast_time
-    year = int(forecast_time.dt.year)
-    month = int(forecast_time.dt.month)
-    day = int(forecast_time.dt.day)
-    filename = f"train_example_{year:04}{month:02}{day:02}.nc"
-
-    output_file = output_path / filename
-
-    if output_file.exists():
-        _logger.info(f"Target file {output_file} already exists. Replacing.")
-        output_file.unlink()
-
-    for k in example:
-        _logger.debug(f"Saving group {k}.")
-        mode = "a" if output_file.exists() else "w"
-        example[k].to_netcdf(output_file, group=f"/{k}", mode=mode, compute=True)
-
-
 def remove_nans(dataset):
     """Little hack to make sure we can train an not have everything explode.
     The data should be approx. zero centered so replacing the nans with zeros should
@@ -430,6 +390,11 @@ def ecmwf_datestring_to_ncep_datestring(datestring, set="train"):
 
 @hydra.main(config_path="conf", config_name="mldataset")
 def cli(cfg):
+    # https://confluence.ecmwf.int/display/UDOC/HPC2020%3A+Reading+a+NetCDF+or+HDF5+file+gets+stuck
+    # os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
+    # get complete stack traces from Hydra
+    os.environ["HYDRA_FULL_ERROR"] = "1"
+
     output_dir = hydra.utils.to_absolute_path(cfg.output_dir)
     output_path = pathlib.Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -441,7 +406,7 @@ def cli(cfg):
 
     if cfg.dask.enabled:
         client = CustomSshClient(
-            num_workers_per_node=cfg.dask.num_workers,
+            num_workers_per_node=cfg.dask.num_workers_per_node,
             worker_memory_limit=cfg.dask.max_memory_per_worker,
             num_threads_per_worker=cfg.dask.num_threads_per_worker,
             # scheduler_port=8786,
@@ -511,8 +476,8 @@ def cli(cfg):
 
     futures = []
     for datestring in datestrings:
-        single_date_future = client.submit(
-            process_single_date,
+        single_date_futures: List[Future] = process_single_date(
+            client,
             cfg,
             output_path,
             input_dir,
@@ -521,20 +486,45 @@ def cli(cfg):
             obs_terciled,
             datestring,
         )
-        futures.append(single_date_future)
-    _ = client.gather(futures)
+        futures.append(single_date_futures)
+    
+    _ = wait(futures, return_when="ALL_COMPLETED")
 
     _logger.debug("---- DONE! ----")
 
-    client.shutdown()
 
 
-def process_single_date(
-    cfg, output_path, input_dir, input_dir_plev, edges, obs_terciled, datestring
-):
+def save_example(example, output_path: pathlib.Path):
+    """Save an example to a single netcdf file. x is the input features. obs is the
+    observations for every valid time in the forecast. y is the terciled target
+    distribution (below, within, above normal)."""
+    if isinstance(example["terciles"], Future):
+        example["terciles"] = example["terciles"].result()  # wait for Future
+    forecast_time = example["terciles"].forecast_time
+    year = int(forecast_time.dt.year)
+    month = int(forecast_time.dt.month)
+    day = int(forecast_time.dt.day)
+    filename = f"train_example_{year:04}{month:02}{day:02}.nc"
 
-    _logger.info(f"Processing datestring {datestring}...")
+    output_file = output_path / filename
 
+    if output_file.exists():
+        _logger.info(f"Target file {output_file} already exists. Replacing.")
+        output_file.unlink()
+
+    for k in example:
+        _logger.debug(f"Saving group {k}.")
+        mode = "a" if output_file.exists() else "w"
+        if isinstance(example[k], Future):
+            # we're waiting on the Future to complete b/c some results may be "None", need to test for that
+            # TODO: these .result() calls are likely to damage performance
+            # is there a better way to do this?
+            example[k] = example[k].result()  # wait for Future
+        if example[k] is not None:
+            example[k].to_netcdf(output_file, group=f"/{k}", mode=mode, compute=True)
+    
+
+def read_data_single_date(cfg, input_dir, input_dir_plev, datestring):
     _logger.info("Reading flat fields...")
     flat_dataset = read_flat_fields(
         input_dir,
@@ -598,11 +588,6 @@ def process_single_date(
     features = features.isel(lead_time=slice(1, None))
     model = model.isel(lead_time=slice(1, None))
 
-    # do NOT persist the data here (OOM)
-    # _logger.info("Persisting merged dataset...")
-    # print(features)
-    # features = features.persist()
-
     years = model.forecast_year
 
     if cfg.set.last_forecast:
@@ -614,6 +599,22 @@ def process_single_date(
         years = years.where(years == cfg.set.year, drop=True)
 
     _logger.info(f"Will make examples for years: {years.data}")
+
+    return features, model, eccc_data, ncep_data, years
+
+
+def process_single_date(
+    client, cfg, output_path, input_dir, input_dir_plev, edges, obs_terciled, datestring
+) -> List[Future]:
+
+    futures: List[Future] = []
+
+    _logger.info(f"Processing datestring {datestring}...")
+
+    features, model, eccc_data, ncep_data, years = client.submit(
+        read_data_single_date,
+        cfg, input_dir, input_dir_plev, datestring
+    ).result()
 
     part_makers = [
         (
@@ -635,8 +636,21 @@ def process_single_date(
         ("eccc_parameters", ECCCModelParameters(eccc_data, weeks_12=cfg.weeks_12)),
         ("ncep_parameters", NCEPModelParameters(ncep_data, weeks_12=cfg.weeks_12)),
     ]
-    make_yearly_examples(years, part_makers, output_path)
 
+    for year in years:
+        _logger.info(f"Making example for year {year.data}.")
+        example = {}
+        for name, part_maker in part_makers:
+            _logger.debug(f" Making part {name} ...")
+            example_part_future = client.submit(part_maker, year, example)
+            futures.append(example_part_future)
+            # if example_part_future is not None:
+            example[name] = example_part_future # part_maker(year, example)
+
+        save_future = client.submit(save_example, example, output_path)
+        futures.append(save_future)
+
+    return futures
 
 if __name__ == "__main__":
     cli()
